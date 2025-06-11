@@ -37,6 +37,12 @@ export default function DashboardLayout({
                   Dashboard
                 </Link>
                 <Link
+                  href="/apps"
+                  className="border-transparent text-textMuted hover:border-textMuted hover:text-textPrimary inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
+                >
+                  Apps
+                </Link>
+                <Link
                   href="/test-tools"
                   className="border-transparent text-textMuted hover:border-textMuted hover:text-textPrimary inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
                 >

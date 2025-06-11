@@ -1,6 +1,5 @@
 import { initTRPC } from '@trpc/server';
 import { PrismaClient } from '@/generated/prisma';
-import { getServerSession } from 'next-auth';
 import { z } from 'zod';
 import { NextRequest } from 'next/server';
 
@@ -9,16 +8,13 @@ const prisma = new PrismaClient();
 // Context type definition
 export type Context = {
   prisma: PrismaClient;
-  session: Awaited<ReturnType<typeof getServerSession>> | null;
   req: NextRequest;
 };
 
 // Create context for each request
 export const createContext = async (opts: { req: NextRequest }): Promise<Context> => {
-  const session = await getServerSession();
   return {
     prisma,
-    session,
     req: opts.req,
   };
 };
@@ -30,21 +26,6 @@ const t = initTRPC.context<Context>().create();
 export const router = t.router;
 export const publicProcedure = t.procedure;
 export const middleware = t.middleware;
-
-// Auth middleware
-const isAuthed = middleware(({ next, ctx }) => {
-  if (!ctx.session) {
-    throw new Error('Not authenticated');
-  }
-  return next({
-    ctx: {
-      session: ctx.session,
-    },
-  });
-});
-
-// Protected procedure
-export const protectedProcedure = t.procedure.use(isAuthed);
 
 // API Key middleware
 const apiKeyMiddleware = middleware(async ({ ctx, next }) => {
