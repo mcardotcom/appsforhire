@@ -1,0 +1,85 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                String         @id @default(uuid())
+  email             String         @unique
+  created_at        DateTime       @default(now())
+  subscription_plan String         @default("free")
+  role              String         @default("user")
+  apiKeys           ApiKey[]
+  superAdmin        SuperAdmin?
+  toolLogs          ToolLog[]
+  usageSummaries    UsageSummary[]
+}
+
+model SuperAdmin {
+  id         String   @id @default(uuid())
+  user_id    String   @unique
+  added_by   String?
+  created_at DateTime @default(now())
+  notes      String?
+  user       User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+}
+
+model ApiKey {
+  id                    String    @id @default(uuid())
+  user_id               String
+  key                   String    @unique
+  created_at            DateTime  @default(now())
+  expires_at            DateTime?
+  is_active             Boolean   @default(true)
+  rate_limit_per_minute Int       @default(100)
+  last_request_at       DateTime?
+  burst_limit           Int       @default(10)
+  window_seconds        Int       @default(60)
+  user                  User      @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  toolLogs              ToolLog[]
+}
+
+model Tool {
+  id            String  @id @default(uuid())
+  name          String
+  description   String
+  version       String  @default("v1")
+  is_active     Boolean @default(true)
+  endpoint_path String
+
+  @@unique([name, version])
+}
+
+model ToolLog {
+  id                String   @id @default(uuid())
+  user_id           String
+  api_key_id        String
+  tool_name         String
+  tool_version      String   @default("v1")
+  input_payload     Json
+  output_payload    Json
+  created_at        DateTime @default(now())
+  status            String   @default("success")
+  execution_time_ms Int?
+  tokens_used       Int?
+  error_message     String?
+  apiKey            ApiKey   @relation(fields: [api_key_id], references: [id], onDelete: Cascade)
+  user              User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+}
+
+model UsageSummary {
+  id           String   @id @default(uuid())
+  user_id      String
+  month_year   String
+  total_calls  Int      @default(0)
+  total_tokens Int      @default(0)
+  created_at   DateTime @default(now())
+  user         User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@unique([user_id, month_year])
+}
