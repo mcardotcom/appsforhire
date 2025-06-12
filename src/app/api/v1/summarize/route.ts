@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { summarizeTool } from '@/tools/summarize';
 import { openapi } from './openapi';
+import { edgeLogger } from '@/utils/edge-logger';
 
 // Simple in-memory rate limiting
 const rateLimits = new Map<string, { count: number; resetTime: number }>();
@@ -65,6 +66,7 @@ export async function POST(req: NextRequest) {
     // Validate input against schema
     const parsed = summarizeTool.inputSchema.safeParse(body);
     if (!parsed.success) {
+      edgeLogger.warn('Invalid input format', { error: parsed.error });
       return NextResponse.json(
         {
           success: false,
@@ -87,7 +89,7 @@ export async function POST(req: NextRequest) {
       }
     });
   } catch (error) {
-    console.error('Error in summarize route:', error);
+    edgeLogger.error('Error in summarize route:', error);
     return NextResponse.json(
       {
         success: false,

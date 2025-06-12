@@ -1,18 +1,25 @@
-import { initTRPC } from '@trpc/server';
-import { PrismaClient } from '@/generated/prisma';
-import { z } from 'zod';
-import { NextRequest } from 'next/server';
+import { initTRPC, TRPCError } from '@trpc/server';
+import { type CreateNextContextOptions } from '@trpc/server/adapters/next';
+import { PrismaClient } from '../generated/prisma';
+import { getApiKeyFromRequest } from '../utils/auth';
 
 const prisma = new PrismaClient();
 
 // Context type definition
 export type Context = {
   prisma: PrismaClient;
-  req: NextRequest;
+  req: CreateNextContextOptions['req'];
+  apiKey?: {
+    id: string;
+    user_id: string;
+    rate_limit_per_minute: number;
+    burst_limit: number;
+    window_seconds: number;
+  };
 };
 
 // Create context for each request
-export const createContext = async (opts: { req: NextRequest }): Promise<Context> => {
+export const createContext = async (opts: { req: CreateNextContextOptions['req'] }): Promise<Context> => {
   return {
     prisma,
     req: opts.req,
@@ -29,49 +36,17 @@ export const middleware = t.middleware;
 
 // API Key middleware
 const apiKeyMiddleware = middleware(async ({ ctx, next }) => {
-  // Try to get API key from headers (for both Node and Edge runtimes)
-  const apiKey = ctx.req.headers.get('x-api-key') || '';
-
+  const apiKey = await getApiKeyFromRequest(ctx.req);
   if (!apiKey) {
-    throw new Error('Missing API key');
+    throw new TRPCError({
+      code: 'UNAUTHORIZED',
+      message: 'API key is required',
+    });
   }
-
-  // Validate API key in the database
-  const apiKeyRecord = await ctx.prisma.apiKey.findFirst({
-    where: { key: apiKey, is_active: true },
-    include: { user: true },
-  });
-
-  if (!apiKeyRecord) {
-    throw new Error('Invalid or inactive API key');
-  }
-
-  // Rate limiting logic
-  const now = new Date();
-  const windowStart = new Date(now.getTime() - apiKeyRecord.window_seconds * 1000);
-  const recentLogs = await ctx.prisma.toolLog.count({
-    where: {
-      api_key_id: apiKeyRecord.id,
-      created_at: { gte: windowStart },
-    },
-  });
-
-  if (recentLogs >= apiKeyRecord.rate_limit_per_minute) {
-    throw new Error('Rate limit exceeded. Please try again later.');
-  }
-
-  // Optionally, update last_request_at
-  await ctx.prisma.apiKey.update({
-    where: { id: apiKeyRecord.id },
-    data: { last_request_at: now },
-  });
-
-  // Attach user and apiKey info to context
   return next({
     ctx: {
       ...ctx,
-      apiKey: apiKeyRecord,
-      user: apiKeyRecord.user,
+      apiKey,
     },
   });
 });

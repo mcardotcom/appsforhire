@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { httpBatchLink } from '@trpc/client';
 import { useState } from 'react';
 import { trpc } from './trpc';
+import { clientCookies } from './client-cookies';
 
 export function TRPCProvider({ children }: { children: React.ReactNode }) {
   const [queryClient] = useState(() => new QueryClient());
@@ -12,12 +13,9 @@ export function TRPCProvider({ children }: { children: React.ReactNode }) {
       links: [
         httpBatchLink({
           url: '/api/trpc',
-          // You can pass any HTTP headers you wish here
-          async headers() {
-            const apiKey = localStorage.getItem('apiKey');
-            return {
-              'x-api-key': apiKey || '',
-            };
+          headers() {
+            const apiKey = clientCookies.getApiKey();
+            return apiKey ? { 'x-api-key': apiKey } : {};
           },
         }),
       ],
