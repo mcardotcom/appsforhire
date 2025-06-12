@@ -1,4 +1,4 @@
-import { SummarizeInputSchema } from '../schemas/summarizeSchema';
+import { SummarizeInputSchema, SummarizeResponseSchema, ErrorResponseSchema } from '../schemas/summarizeSchema';
 import { z } from 'zod';
 
 export const summarizeTool = {
@@ -7,46 +7,93 @@ export const summarizeTool = {
   version: 'v1',
   endpoint: '/api/v1/summarize',
   inputSchema: SummarizeInputSchema,
-  outputSchema: z.object({
-    success: z.boolean(),
-    summary: z.string(),
-    metadata: z.object({
-      originalLength: z.number(),
-      summaryLength: z.number(),
-      model: z.string().optional(),
-      language: z.string().optional()
-    }),
-    error: z.any().nullable()
-  }),
+  outputSchema: SummarizeResponseSchema,
   handler: async (input: z.infer<typeof SummarizeInputSchema>) => {
+    const startTime = Date.now();
+    const requestId = crypto.randomUUID();
+
     try {
-      // Basic summarization: return the first N sentences or maxLength characters
-      const { text, maxLength = 200, language, model } = input;
-      let summary = text;
-      if (text.length > maxLength) {
-        // Naive: cut at maxLength, try to end at a sentence
-        const cut = text.slice(0, maxLength);
-        const lastPeriod = cut.lastIndexOf('.') + 1;
-        summary = lastPeriod > 0 ? cut.slice(0, lastPeriod) : cut;
+      // Input validation is handled by the schema
+      const { text, maxLength, language, model } = input;
+
+      // Remove excessive whitespace while preserving meaningful structure
+      const cleanedText = text.trim().replace(/\s+/g, ' ');
+
+      // Sentence-aware summarization
+      const sentences = cleanedText.match(/[^.!?]+[.!?]+/g) || [cleanedText];
+      let summary = '';
+      let currentLength = 0;
+
+      for (const sentence of sentences) {
+        if (currentLength + sentence.length <= maxLength) {
+          summary += sentence;
+          currentLength += sentence.length;
+        } else {
+          break;
+        }
       }
-      // TODO: Plug in advanced summarization model here if available
+
+      // Fallback if no complete sentences fit
+      if (!summary && sentences.length > 0) {
+        summary = sentences[0].slice(0, Math.max(0, maxLength - 3)) + '...';
+      }
+
+      // Validate that the summary is meaningful
+      if (!summary.trim()) {
+        throw new Error('Summary is empty or not meaningful');
+      }
+
+      const processingTimeMs = Date.now() - startTime;
+      const confidence = Math.min(1, Math.max(0, summary.length / cleanedText.length));
+
       return {
         success: true,
         summary,
         metadata: {
-          originalLength: text.length,
+          originalLength: cleanedText.length,
           summaryLength: summary.length,
           model,
-          language
+          language,
+          confidence,
+          processingTimeMs
         },
         error: null
       };
     } catch (error) {
+      const errorResponse: z.infer<typeof ErrorResponseSchema> = {
+        error: error instanceof Error ? error.message : 'Unknown error occurred',
+        code: 'INTERNAL_ERROR',
+        detail: error instanceof Error ? error.stack || '' : '',
+        timestamp: new Date().toISOString(),
+        requestId
+      };
+
+      // Map specific errors to appropriate error codes
+      if (error instanceof z.ZodError) {
+        errorResponse.code = 'INVALID_INPUT';
+        errorResponse.detail = error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join(', ');
+      } else if (error instanceof Error) {
+        if (error.message.includes('too long')) {
+          errorResponse.code = 'TEXT_TOO_LONG';
+        } else if (error.message.includes('rate limit')) {
+          errorResponse.code = 'RATE_LIMIT_EXCEEDED';
+        } else if (error.message.includes('model')) {
+          errorResponse.code = 'MODEL_UNAVAILABLE';
+        }
+      }
+
       return {
         success: false,
         summary: '',
-        metadata: {},
-        error: error instanceof Error ? error.message : error
+        metadata: {
+          originalLength: input.text?.length || 0,
+          summaryLength: 0,
+          model: input.model,
+          language: input.language,
+          confidence: 0,
+          processingTimeMs: Date.now() - startTime
+        },
+        error: errorResponse.error
       };
     }
   }
