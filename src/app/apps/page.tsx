@@ -58,6 +58,9 @@ export default function AppsPage() {
 
   const renderModal = () => {
     if (!modalTool) return null;
+    const currentTool = TOOLS.find(t => t.key === modalTool);
+    if (!currentTool) return null;
+
     return (
       <Dialog open={!!modalTool} onClose={() => setModalTool(null)} className="fixed z-50 inset-0 overflow-y-auto">
         <div className="fixed inset-0 bg-black bg-opacity-30" aria-hidden="true" />
@@ -70,26 +73,26 @@ export default function AppsPage() {
             >
               <FiX className="w-5 h-5" />
             </button>
-            <Dialog.Title className="text-lg font-semibold mb-2">{TOOLS.find(t => t.key === modalTool)?.name} API Details</Dialog.Title>
+            <Dialog.Title className="text-lg font-semibold mb-2">{currentTool.name} API Details</Dialog.Title>
             {loadingMeta ? (
               <div className="text-gray-500">Loading...</div>
-            ) : toolMeta ? (
+            ) : toolMeta && toolMeta.info ? (
               <div className="space-y-4">
                 <pre className="bg-gray-100 p-4 rounded text-xs overflow-x-auto whitespace-pre">
-{`openapi: ${toolMeta.openapi}
+{`openapi: ${toolMeta.openapi || '3.0.0'}
 info:
-  title: ${toolMeta.info.title}
-  description: ${toolMeta.info.description}
-  version: ${toolMeta.info.version}
+  title: ${toolMeta.info.title || currentTool.name}
+  description: ${toolMeta.info.description || currentTool.description}
+  version: ${toolMeta.info.version || '1.0.0'}
 servers:
-  - url: ${toolMeta.servers[0].url}
-    description: ${toolMeta.servers[0].description}
+  - url: ${toolMeta.servers?.[0]?.url || 'http://localhost:3000'}
+    description: ${toolMeta.servers?.[0]?.description || 'Local development server'}
 paths:
-  ${Object.keys(toolMeta.paths)[0]}:
+  ${Object.keys(toolMeta.paths || {})[0] || '/api/v1/' + modalTool}:
     post:
-      operationId: ${toolMeta.paths[Object.keys(toolMeta.paths)[0]].post.operationId}
-      summary: ${toolMeta.paths[Object.keys(toolMeta.paths)[0]].post.summary}
-      description: ${toolMeta.paths[Object.keys(toolMeta.paths)[0]].post.description}
+      operationId: ${toolMeta.paths?.[Object.keys(toolMeta.paths || {})[0]]?.post?.operationId || modalTool}
+      summary: ${toolMeta.paths?.[Object.keys(toolMeta.paths || {})[0]]?.post?.summary || currentTool.description}
+      description: ${toolMeta.paths?.[Object.keys(toolMeta.paths || {})[0]]?.post?.description || currentTool.description}
       security:
         - bearerAuth: []
       requestBody:
@@ -97,14 +100,14 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/${toolMeta.info.title.replace(/\s+/g, '')}Request'
+              $ref: '#/components/schemas/${(toolMeta.info.title || currentTool.name).replace(/\s+/g, '')}Request'
       responses:
         '200':
-          description: ${toolMeta.paths[Object.keys(toolMeta.paths)[0]].post.responses['200'].description}
+          description: ${toolMeta.paths?.[Object.keys(toolMeta.paths || {})[0]]?.post?.responses?.['200']?.description || 'Successful operation'}
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/${toolMeta.info.title.replace(/\s+/g, '')}Response'
+                $ref: '#/components/schemas/${(toolMeta.info.title || currentTool.name).replace(/\s+/g, '')}Response'
         '400':
           description: Bad request - invalid JSON or parameters
           content:
@@ -131,7 +134,7 @@ components:
       bearerFormat: JWT
       description: API key for authentication
   schemas:
-    ${toolMeta.info.title.replace(/\s+/g, '')}Request:
+    ${(toolMeta.info.title || currentTool.name).replace(/\s+/g, '')}Request:
       type: object
       properties:
         json:
@@ -169,7 +172,7 @@ components:
       required:
         - json
       additionalProperties: false
-    ${toolMeta.info.title.replace(/\s+/g, '')}Response:
+    ${(toolMeta.info.title || currentTool.name).replace(/\s+/g, '')}Response:
       type: object
       properties:
         success:
@@ -199,76 +202,52 @@ components:
               type: array
               items:
                 type: string
-              description: Any warnings during processing
-          required:
-            - fieldsProcessed
-            - fieldsRemoved
-            - fieldsNormalized
-            - warnings
+              description: Any warnings generated during processing
           additionalProperties: false
-        error:
-          oneOf:
-            - type: object
-            - type: "null"
-          description: Error information if operation failed
-        original:
-          oneOf:
-            - type: object
-            - type: string
-            - type: "null"
-          description: Original input if includeOriginal is true
       required:
         - success
+        - data
         - metadata
-        - original
       additionalProperties: false
     ErrorResponse:
       type: object
       properties:
-        success:
-          type: boolean
-          enum: [false]
         error:
-          type: object
-          properties:
-            message:
-              type: string
-              description: Error message
-            code:
-              type: string
-              description: Error code
-          required:
-            - message
-        metadata:
-          type: object
-          properties:
-            fieldsProcessed:
-              type: integer
-              default: 0
-            fieldsRemoved:
-              type: integer
-              default: 0
-            fieldsNormalized:
-              type: integer
-              default: 0
-            warnings:
-              type: array
-              items:
-                type: string
-              default: []
-        original:
-          type: "null"
+          type: string
+          description: Error message
+        detail:
+          type: string
+          description: Detailed error information
       required:
-        - success
         - error
-        - metadata
-        - original`}
+      additionalProperties: false`}
                 </pre>
+                <div className="flex justify-end space-x-2">
+                  <button
+                    onClick={() => handleCopy(`curl -X POST "http://localhost:3000/api/v1/${modalTool}" \\
+  -H "Authorization: Bearer YOUR_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "json": "{\\"name\\": \\"John\\", \\"age\\": null, \\"tags\\": [], \\"profile\\": {}}",
+    "options": {
+      "removeNulls": true,
+      "removeEmptyArrays": true,
+      "removeEmptyObjects": true,
+      "removeEmptyStrings": true,
+      "normalizeTypes": true,
+      "includeOriginal": false
+    }
+  }'`)}
+                    className="flex items-center space-x-1 px-3 py-1 text-sm text-gray-600 hover:text-gray-800"
+                  >
+                    <FiCopy className="w-4 h-4" />
+                    <span>{copied ? "Copied!" : "Copy cURL"}</span>
+                  </button>
+                </div>
               </div>
             ) : (
-              <div className="text-red-500">Failed to load tool meta.</div>
+              <div className="text-red-500">Failed to load API details</div>
             )}
-            {copied && <div className="text-green-600 text-xs mt-2">Copied!</div>}
           </div>
         </div>
       </Dialog>
