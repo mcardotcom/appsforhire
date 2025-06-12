@@ -47,6 +47,34 @@ export const CleanJsonInputSchema = z.object({
     fieldRules: z.array(FieldRuleSchema).optional(),
 });
 
+export const CleanJsonOutputSchema = z.object({
+    success: z.boolean(),
+    data: z.any().nullable(),
+    error: z.object({
+        code: z.string(),
+        message: z.string(),
+        details: z.any().optional(),
+    }).optional(),
+    metadata: z.object({
+        fieldsProcessed: z.number(),
+        fieldsRemoved: z.number(),
+        fieldsNormalized: z.number(),
+        fieldsValidated: z.number(),
+        warnings: z.array(z.object({
+            path: z.string(),
+            message: z.string(),
+            value: z.any(),
+        })),
+        changes: z.array(z.object({
+            path: z.string(),
+            oldValue: z.any(),
+            newValue: z.any(),
+            ruleApplied: z.string(),
+        })),
+    }).optional(),
+    original: z.any().nullable(),
+});
+
 // --- 2. Type Definitions ---
 
 type CleaningOptions = z.infer<typeof CleanJsonInputSchema>['options'];
@@ -158,6 +186,7 @@ export const cleanJsonTool = {
     description: 'Cleans, normalizes, and validates JSON data with agent-first features.',
     version: 'v2.0.0',
     inputSchema: CleanJsonInputSchema,
+    outputSchema: CleanJsonOutputSchema,
     handler: async (input: z.infer<typeof CleanJsonInputSchema>) => {
         const { json, options = {}, fieldRules = [] } = input;
         const auditId = crypto.randomUUID();

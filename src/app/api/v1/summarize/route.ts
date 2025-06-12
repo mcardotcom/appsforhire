@@ -1,62 +1,100 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { summarizeTool } from '@/tools/summarize';
-import { ErrorResponseSchema, ErrorCode } from '@/schemas/summarizeSchema';
-import { z } from 'zod';
-import { zodToJsonSchema } from 'zod-to-json-schema';
+import { openapi } from './openapi';
 
-// Simple in-memory rate limiting (replace with Redis/DB in production)
-const RATE_LIMIT = 100; // requests per hour
-const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
+// Simple in-memory rate limiting
+const rateLimits = new Map<string, { count: number; resetTime: number }>();
+const REQUESTS_PER_HOUR = 100;
 
-function checkRateLimit(apiKey: string): { allowed: boolean; remaining: number; resetTime: number } {
+function checkRateLimit(apiKey: string) {
   const now = Date.now();
-  const hourAgo = now - 60 * 60 * 1000;
-  
-  let limit = rateLimitMap.get(apiKey);
-  if (!limit || limit.resetTime < hourAgo) {
-    limit = { count: 0, resetTime: now + 60 * 60 * 1000 };
+  const limit = rateLimits.get(apiKey);
+
+  if (!limit || now > limit.resetTime) {
+    rateLimits.set(apiKey, {
+      count: 1,
+      resetTime: now + 3600000 // 1 hour
+    });
+    return { allowed: true, remaining: REQUESTS_PER_HOUR - 1, resetTime: now + 3600000 };
   }
-  
-  const remaining = Math.max(0, RATE_LIMIT - limit.count);
-  const allowed = remaining > 0;
-  
-  if (allowed) {
-    limit.count++;
-    rateLimitMap.set(apiKey, limit);
+
+  if (limit.count >= REQUESTS_PER_HOUR) {
+    return { allowed: false, remaining: 0, resetTime: limit.resetTime };
   }
-  
-  return { allowed, remaining, resetTime: limit.resetTime };
+
+  limit.count++;
+  return { allowed: true, remaining: REQUESTS_PER_HOUR - limit.count, resetTime: limit.resetTime };
 }
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
-    const parsed = summarizeTool.inputSchema.safeParse(body);
+    // Check for API key in x-api-key header
+    let apiKey = req.headers.get('x-api-key');
+    
+    // If not found, check for Bearer token in Authorization header
+    if (!apiKey) {
+      const authHeader = req.headers.get('authorization');
+      if (authHeader?.startsWith('Bearer ')) {
+        apiKey = authHeader.substring(7); // Remove 'Bearer ' prefix
+      }
+    }
 
+    if (!apiKey) {
+      return NextResponse.json(
+        { error: 'API key is required' },
+        { status: 401 }
+      );
+    }
+
+    const { allowed, remaining, resetTime } = checkRateLimit(apiKey);
+    if (!allowed) {
+      return NextResponse.json(
+        { error: 'Rate limit exceeded' },
+        { 
+          status: 429,
+          headers: {
+            'X-RateLimit-Remaining': '0',
+            'X-RateLimit-Reset': resetTime.toString()
+          }
+        }
+      );
+    }
+
+    const body = await req.json();
+    
+    // Validate input against schema
+    const parsed = summarizeTool.inputSchema.safeParse(body);
     if (!parsed.success) {
       return NextResponse.json(
         {
-          error: 'Invalid input',
-          code: ErrorCode.INVALID_INPUT,
-          detail: parsed.error.message,
-          timestamp: new Date().toISOString(),
-          requestId: crypto.randomUUID()
+          success: false,
+          error: {
+            code: 'INVALID_INPUT',
+            message: 'Invalid input format',
+            details: parsed.error
+          }
         },
         { status: 400 }
       );
     }
 
     const result = await summarizeTool.handler(parsed.data);
-    return NextResponse.json(result);
+
+    return NextResponse.json(result, {
+      headers: {
+        'X-RateLimit-Remaining': remaining.toString(),
+        'X-RateLimit-Reset': resetTime.toString()
+      }
+    });
   } catch (error) {
-    console.error('Error processing summarize request:', error);
+    console.error('Error in summarize route:', error);
     return NextResponse.json(
       {
-        error: error instanceof Error ? error.message : 'An unknown error occurred',
-        code: ErrorCode.PROCESSING_ERROR,
-        detail: 'Failed to process the summarize request',
-        timestamp: new Date().toISOString(),
-        requestId: crypto.randomUUID()
+        success: false,
+        error: {
+          code: 'INTERNAL_ERROR',
+          message: error instanceof Error ? error.message : 'Failed to process request'
+        }
       },
       { status: 500 }
     );
@@ -64,105 +102,5 @@ export async function POST(req: NextRequest) {
 }
 
 export async function GET() {
-  try {
-    const inputSchema = zodToJsonSchema(summarizeTool.inputSchema, {
-      $refStrategy: 'none',
-      name: 'SummarizeRequest',
-      definitionPath: 'definitions',
-      target: 'openApi3'
-    });
-
-    const outputSchema = zodToJsonSchema(summarizeTool.outputSchema, {
-      $refStrategy: 'none',
-      name: 'SummarizeResponse',
-      definitionPath: 'definitions',
-      target: 'openApi3'
-    });
-
-    const errorSchema = zodToJsonSchema(ErrorResponseSchema, {
-      $refStrategy: 'none',
-      name: 'ErrorResponse',
-      definitionPath: 'definitions',
-      target: 'openApi3'
-    });
-
-    return NextResponse.json({
-      openapi: '3.0.0',
-      info: {
-        title: 'Summarize API',
-        version: summarizeTool.version,
-        description: summarizeTool.description
-      },
-      components: {
-        schemas: {
-          SummarizeRequest: inputSchema,
-          SummarizeResponse: outputSchema,
-          ErrorResponse: errorSchema
-        }
-      },
-      paths: {
-        '/api/v1/summarize': {
-          post: {
-            operationId: 'summarize',
-            summary: 'Summarize text',
-            description: 'Summarizes the provided text. Requires a valid API key in the x-api-key header.',
-            requestBody: {
-              required: true,
-              content: {
-                'application/json': {
-                  schema: {
-                    $ref: '#/components/schemas/SummarizeRequest'
-                  }
-                }
-              }
-            },
-            responses: {
-              '200': {
-                description: 'Successful summarization',
-                content: {
-                  'application/json': {
-                    schema: {
-                      $ref: '#/components/schemas/SummarizeResponse'
-                    }
-                  }
-                }
-              },
-              '400': {
-                description: 'Invalid input',
-                content: {
-                  'application/json': {
-                    schema: {
-                      $ref: '#/components/schemas/ErrorResponse'
-                    }
-                  }
-                }
-              },
-              '500': {
-                description: 'Server error',
-                content: {
-                  'application/json': {
-                    schema: {
-                      $ref: '#/components/schemas/ErrorResponse'
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    });
-  } catch (error) {
-    console.error('Error generating OpenAPI schema:', error);
-    return NextResponse.json(
-      {
-        error: 'Failed to generate API documentation',
-        code: ErrorCode.PROCESSING_ERROR,
-        detail: error instanceof Error ? error.message : 'Unknown error',
-        timestamp: new Date().toISOString(),
-        requestId: crypto.randomUUID()
-      },
-      { status: 500 }
-    );
-  }
+  return NextResponse.json(openapi);
 } 

@@ -26,9 +26,19 @@ export default function ToolPage() {
             'Cache-Control': 'no-cache'
           }
         });
-        if (!res.ok) throw new Error("Failed to fetch OpenAPI schema");
+        
+        if (!res.ok) {
+          const errorData = await res.json();
+          throw new Error(errorData.error || "Failed to fetch OpenAPI schema");
+        }
+        
         const data = await res.json();
         console.log('Received OpenAPI schema:', data);
+        
+        if (!data || typeof data !== 'object') {
+          throw new Error("Invalid OpenAPI schema format");
+        }
+        
         // Convert JSON OpenAPI to YAML
         const yaml = jsonToYaml(data);
         setOpenApiYaml(yaml);

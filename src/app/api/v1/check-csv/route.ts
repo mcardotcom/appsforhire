@@ -1,270 +1,99 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { checkCsvTool } from '@/tools/check-csv';
-import { z } from 'zod';
-import { zodToJsonSchema } from 'zod-to-json-schema';
+import { openapi } from './openapi';
 
-// Convert Zod schemas to JSON Schema format
-const inputSchema = zodToJsonSchema(checkCsvTool.inputSchema, {
-  $refStrategy: 'none',
-  target: 'jsonSchema7',
-  name: 'CheckCsvRequest',
-  basePath: ['components', 'schemas']
-});
+// Simple in-memory rate limiting
+const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
+const RATE_LIMIT = 100; // requests per hour
+const RATE_LIMIT_WINDOW = 60 * 60 * 1000; // 1 hour in milliseconds
 
-const outputSchema = zodToJsonSchema(checkCsvTool.outputSchema, {
-  $refStrategy: 'none',
-  target: 'jsonSchema7',
-  name: 'CheckCsvResponse',
-  basePath: ['components', 'schemas']
-});
+function checkRateLimit(apiKey: string) {
+  const now = Date.now();
+  const limit = rateLimitMap.get(apiKey);
 
-const errorSchema = {
-  type: 'object',
-  properties: {
-    error: {
-      type: 'string',
-      description: 'Error message'
-    },
-    detail: {
-      type: 'string',
-      description: 'Detailed error information'
-    }
-  },
-  required: ['error']
-};
+  if (!limit || now > limit.resetTime) {
+    rateLimitMap.set(apiKey, { count: 1, resetTime: now + RATE_LIMIT_WINDOW });
+    return { allowed: true, remaining: RATE_LIMIT - 1, resetTime: now + RATE_LIMIT_WINDOW };
+  }
 
-export async function POST(request: NextRequest) {
+  if (limit.count >= RATE_LIMIT) {
+    return { allowed: false, remaining: 0, resetTime: limit.resetTime };
+  }
+
+  limit.count++;
+  return { allowed: true, remaining: RATE_LIMIT - limit.count, resetTime: limit.resetTime };
+}
+
+export async function POST(req: NextRequest) {
   try {
-    // Log all headers for debugging
-    console.log('All request headers:', Object.fromEntries(request.headers.entries()));
-    
-    // Check API key from both headers
-    const authHeader = request.headers.get('Authorization');
-    const xApiKey = request.headers.get('x-api-key');
-    
-    // Extract API key from Authorization header (Bearer token) or use x-api-key
-    const apiKey = authHeader?.startsWith('Bearer ') 
-      ? authHeader.substring(7) 
-      : xApiKey;
-    
-    console.log('API key from x-api-key header:', xApiKey);
-    console.log('Authorization header:', authHeader);
-    console.log('Extracted API key:', apiKey);
-    
+    // Check API key
+    const apiKey = req.headers.get('x-api-key');
     if (!apiKey) {
-      console.log('No API key found in either header');
       return NextResponse.json(
-        {
-          error: 'Unauthorized',
-          code: 'INVALID_INPUT',
-          detail: 'Missing API key',
-          timestamp: new Date().toISOString(),
-          requestId: crypto.randomUUID()
-        },
+        { success: false, error: { code: 'MISSING_API_KEY', message: 'API key is required' } },
         { status: 401 }
       );
     }
 
-    const body = await request.json();
-    
-    // Check if the request body has the correct structure
-    if (!body.csv && !body.json) {
+    // Check rate limit
+    const rateLimit = checkRateLimit(apiKey);
+    if (!rateLimit.allowed) {
       return NextResponse.json(
-        {
-          error: 'Invalid input',
-          code: 'INVALID_INPUT',
-          detail: 'Request body must contain either a "csv" or "json" field',
-          timestamp: new Date().toISOString(),
-          requestId: crypto.randomUUID()
+        { success: false, error: { code: 'RATE_LIMIT_EXCEEDED', message: 'Rate limit exceeded' } },
+        { 
+          status: 429,
+          headers: {
+            'X-RateLimit-Remaining': rateLimit.remaining.toString(),
+            'X-RateLimit-Reset': rateLimit.resetTime.toString()
+          }
+        }
+      );
+    }
+
+    // Parse and validate input
+    const body = await req.json();
+    const validationResult = checkCsvTool.inputSchema.safeParse(body);
+    
+    if (!validationResult.success) {
+      return NextResponse.json(
+        { 
+          success: false, 
+          error: { 
+            code: 'INVALID_INPUT', 
+            message: 'Invalid input format',
+            details: validationResult.error.format()
+          }
         },
         { status: 400 }
       );
     }
 
-    // Transform the input if it's using the json field
-    const input = {
-      csv: body.csv || body.json,
-      options: body.options || {}
-    };
-    
-    // Validate input using the tool's schema
-    const validatedInput = checkCsvTool.inputSchema.parse(input);
-    
-    // Process the CSV data
-    const result = await checkCsvTool.handler(validatedInput);
-    
-    // Validate output using the tool's schema
-    const validatedOutput = checkCsvTool.outputSchema.parse(result);
-    
-    return NextResponse.json(validatedOutput);
+    // Process the request
+    const result = await checkCsvTool.handler(validationResult.data);
+
+    // Return response with rate limit headers
+    return NextResponse.json(result, {
+      headers: {
+        'X-RateLimit-Remaining': rateLimit.remaining.toString(),
+        'X-RateLimit-Reset': rateLimit.resetTime.toString()
+      }
+    });
   } catch (error) {
-    console.error('Error processing CSV:', error);
-    
-    if (error instanceof z.ZodError) {
-      return NextResponse.json(
-        {
-          error: 'Invalid input',
-          code: 'INVALID_INPUT',
-          detail: error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join(', '),
-          timestamp: new Date().toISOString(),
-          requestId: crypto.randomUUID()
-        },
-        { status: 400 }
-      );
-    }
-    
+    console.error('Error processing request:', error);
     return NextResponse.json(
-      {
-        error: 'Internal server error',
-        code: 'INTERNAL_ERROR',
-        detail: error instanceof Error ? error.message : 'Unknown error',
-        timestamp: new Date().toISOString(),
-        requestId: crypto.randomUUID()
+      { 
+        success: false, 
+        error: { 
+          code: 'PROCESSING_ERROR', 
+          message: 'Error processing request',
+          details: error instanceof Error ? error.message : 'Unknown error'
+        }
       },
       { status: 500 }
     );
   }
 }
 
-// OpenAPI schema
-export const openapi = {
-  openapi: "3.1.0",
-  info: {
-    title: "Check CSV API",
-    description: "API for validating and checking CSV data",
-    version: "1.0.0"
-  },
-  servers: [
-    {
-      url: "https://1c65-2603-9000-f300-1662-2e6e-f657-9710-a10.ngrok-free.app",
-      description: "API Server"
-    }
-  ],
-  components: {
-    schemas: {
-      CheckCsvRequest: inputSchema,
-      CheckCsvResponse: outputSchema,
-      ErrorResponse: {
-        type: "object",
-        properties: {
-          error: {
-            type: "string"
-          },
-          code: {
-            type: "string"
-          },
-          detail: {
-            type: "string"
-          },
-          timestamp: {
-            type: "string",
-            format: "date-time"
-          },
-          requestId: {
-            type: "string",
-            format: "uuid"
-          }
-        }
-      }
-    },
-    securitySchemes: {
-      apiKeyAuth: {
-        type: "apiKey",
-        in: "header",
-        name: "x-api-key",
-        description: "API key for authentication. Required for all requests."
-      }
-    }
-  },
-  security: [
-    {
-      apiKeyAuth: []
-    }
-  ],
-  paths: {
-    "/api/v1/check-csv": {
-      post: {
-        operationId: "checkCsv",
-        summary: "Check CSV data",
-        description: "Validates and checks CSV data for errors and issues. Requires a valid API key.",
-        security: [
-          {
-            apiKeyAuth: []
-          }
-        ],
-        requestBody: {
-          required: true,
-          content: {
-            "application/json": {
-              schema: {
-                $ref: "#/components/schemas/CheckCsvRequest"
-              }
-            }
-          }
-        },
-        responses: {
-          "200": {
-            description: "Successful response",
-            content: {
-              "application/json": {
-                schema: {
-                  $ref: "#/components/schemas/CheckCsvResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            description: "Bad request - invalid input",
-            content: {
-              "application/json": {
-                schema: {
-                  $ref: "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            description: "Unauthorized - missing or invalid API key",
-            content: {
-              "application/json": {
-                schema: {
-                  $ref: "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "403": {
-            description: "Forbidden - invalid API key",
-            content: {
-              "application/json": {
-                schema: {
-                  $ref: "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "413": {
-            description: "Payload too large",
-            content: {
-              "application/json": {
-                schema: {
-                  $ref: "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "500": {
-            description: "Internal server error",
-            content: {
-              "application/json": {
-                schema: {
-                  $ref: "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-}; 
+export async function GET() {
+  return NextResponse.json(openapi);
+} 

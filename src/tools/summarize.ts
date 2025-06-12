@@ -132,15 +132,147 @@ function extractiveSummary(text: string, options: z.infer<typeof SummarizeInputS
     const maxLength = text.length * lengthMap[summaryLength];
     
     if (options.format === 'one_sentence') {
-        return sentences[0] || '';
+        // For one sentence, try to find the most informative sentence
+        const firstSentence = sentences[0];
+        const lastSentence = sentences[sentences.length - 1];
+        const middleSentence = sentences[Math.floor(sentences.length / 2)];
+        
+        // Prefer the first sentence if it's not too long
+        if (firstSentence.length <= 200) {
+            return firstSentence;
+        }
+        // Otherwise, combine key information from first and last
+        return `${firstSentence.split('.')[0]}. ${lastSentence}`;
     }
     
+    // Score sentences based on position, content, and importance
+    const scoredSentences = sentences.map((sentence, index) => {
+        // Position score: First and last sentences are often important
+        const positionScore = index === 0 ? 2 : index === sentences.length - 1 ? 1.5 : 1;
+        
+        // Length score: Prefer sentences that are neither too short nor too long
+        const lengthScore = sentence.length > 50 && sentence.length < 200 ? 1.5 : 1;
+        
+        // Keyword score: Sentences with more keywords are likely more important
+        const keywordScore = extractKeywords(sentence).length * 0.5;
+        
+        // Content score: Boost sentences that appear to be section headers, list items, or contain important markers
+        const isMainHeader = sentence.match(/^[A-Z][^.!?]*:$/) || 
+                           sentence.match(/^[A-Z][^.!?]*\s*\([^)]+\):$/) ||
+                           sentence.match(/^[A-Z][^.!?]*\s*:$/) ||
+                           sentence.match(/^[^.!?]*:$/);  // Any line ending with colon
+        const isSubHeader = sentence.match(/^[A-Z][^.!?]*\s*\([^)]+\):/) ||
+                          sentence.match(/^[A-Z][^.!?]*\s*:/) ||
+                          sentence.match(/^[^.!?]*:$/);  // Any line ending with colon
+        const isListItem = sentence.match(/^[•\-\*]\s|^\d+\.\s/);
+        const hasImportantMarkers = sentence.match(/\b(important|key|critical|significant|primary|major)\b/i);
+        
+        // Check for author and metadata information
+        const isAuthorInfo = sentence.match(/\b(by|author|written by|prepared by|created by)\b/i) ||
+                           sentence.match(/^[A-Z][a-z]+ [A-Z][a-z]+$/);  // Simple name pattern
+        const isMetadata = sentence.match(/\b(version|date|created|updated|revised|draft|final)\b/i) ||
+                          sentence.match(/\d{4}-\d{2}-\d{2}/) ||  // Date pattern
+                          sentence.match(/\bv\d+\.\d+\b/);  // Version pattern
+        
+        let contentScore = 1;
+        if (isMainHeader) contentScore = 1.5;
+        else if (isSubHeader) contentScore = 1.4;
+        else if (isListItem) contentScore = 1.3;
+        else if (hasImportantMarkers) contentScore = 1.2;
+        else if (isAuthorInfo) contentScore = 1.1;  // Slightly boost author info
+        else if (isMetadata) contentScore = 0.8;    // Slightly reduce metadata importance
+        
+        return {
+            sentence,
+            score: positionScore * lengthScore * (1 + keywordScore) * contentScore,
+            isMainHeader,
+            isSubHeader,
+            isListItem,
+            isAuthorInfo,
+            isMetadata
+        };
+    });
+    
+    // Sort by score and take top sentences until we reach maxLength
     let summary = '';
-    for (const sentence of sentences) {
+    let currentSection = '';
+    let inList = false;
+    let indentLevel = 0;
+    let lastWasHeader = false;
+    let authorInfo = '';
+    let metadata = '';
+    
+    // First, collect author and metadata information
+    for (const { sentence, isAuthorInfo, isMetadata } of scoredSentences) {
+        if (isAuthorInfo) {
+            authorInfo = sentence;
+        } else if (isMetadata) {
+            metadata = sentence;
+        }
+    }
+    
+    // Then build the summary
+    for (const { sentence, isMainHeader, isSubHeader, isListItem } of scoredSentences.sort((a, b) => b.score - a.score)) {
         if ((summary.length + sentence.length) <= maxLength) {
-            summary += sentence + ' ';
+            // Handle main section headers
+            if (isMainHeader) {
+                if (currentSection) {
+                    summary += '\n\n';
+                }
+                currentSection = sentence;
+                summary += sentence + '\n';
+                inList = false;
+                indentLevel = 0;
+                lastWasHeader = true;
+            }
+            // Handle subsection headers
+            else if (isSubHeader) {
+                if (currentSection) {
+                    summary += '\n';
+                }
+                // If the last line was a header, we're at the same level
+                // Otherwise, we're nested one level deeper
+                if (!lastWasHeader) {
+                    indentLevel++;
+                }
+                summary += '  '.repeat(indentLevel) + sentence + '\n';
+                inList = false;
+                lastWasHeader = true;
+            }
+            // Handle list items
+            else if (isListItem) {
+                if (!inList && currentSection) {
+                    summary += '\n';
+                }
+                summary += '  '.repeat(indentLevel + 1) + sentence + '\n';
+                inList = true;
+                lastWasHeader = false;
+            }
+            // Regular sentence
+            else {
+                if (inList) {
+                    summary += '\n';
+                    inList = false;
+                }
+                if (indentLevel > 0) {
+                    summary += '  '.repeat(indentLevel);
+                }
+                summary += sentence + ' ';
+                lastWasHeader = false;
+            }
         } else {
             break;
+        }
+    }
+    
+    // Add author and metadata information if available
+    if (authorInfo || metadata) {
+        summary += '\n\n';
+        if (authorInfo) {
+            summary += `Author: ${authorInfo}\n`;
+        }
+        if (metadata) {
+            summary += `Metadata: ${metadata}\n`;
         }
     }
     
@@ -162,6 +294,16 @@ async function abstractiveSummary(text: string, options: z.infer<typeof Summariz
         The desired length is "${options.summaryLength || 'medium'}".
         The output format should be: "${options.format || 'paragraph'}".
 
+        Guidelines:
+        - Maintain key points and main arguments
+        - Preserve important details and context
+        - Ensure logical flow and coherence
+        - Include relevant background information
+        - Highlight implications and conclusions
+        - Keep a clear and professional tone
+        - Structure the summary with clear sections if appropriate
+        - Focus on actionable insights and key recommendations
+
         Text to summarize:
         ---
         ${text}
@@ -171,7 +313,10 @@ async function abstractiveSummary(text: string, options: z.infer<typeof Summariz
     
     // --- MOCK API CALL ---
     console.log("Making mock API call to an LLM with the following prompt:", prompt);
-    const mockSummary = `This is a high-quality, abstractive summary generated for the purpose of "${options.agentContext || 'general understanding'}", as requested. It is formatted as a ${options.format || 'paragraph'}.`;
+    
+    // For now, use the improved extractive summary as a fallback
+    const fallbackSummary = extractiveSummary(text, options);
+    const mockSummary = `Based on the provided text, here's a comprehensive summary:\n\n${fallbackSummary}\n\nThis summary captures the key points and recommendations while maintaining the original context and accuracy.`;
     // --- END MOCK API CALL ---
 
     const inputTokens = Math.ceil(prompt.length / 4);
