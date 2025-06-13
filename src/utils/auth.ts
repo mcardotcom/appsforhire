@@ -1,34 +1,68 @@
-import { type NextRequest } from 'next/server';
-import { PrismaClient } from '../generated/prisma';
+import { supabase } from './supabase';
+import { handleSupabaseError } from './supabase';
+import { cookies } from 'next/headers';
+import { NextRequest } from 'next/server';
 
-const prisma = new PrismaClient();
+export async function getApiKeyFromRequest(request: NextRequest) {
+  try {
+    // Check for API key in x-api-key header
+    let apiKey = request.headers.get('x-api-key');
+    
+    // If not found, check for Bearer token in Authorization header
+    if (!apiKey) {
+      const authHeader = request.headers.get('authorization');
+      if (authHeader?.startsWith('Bearer ')) {
+        apiKey = authHeader.substring(7); // Remove 'Bearer ' prefix
+      }
+    }
 
-export async function getApiKeyFromRequest(req: NextRequest) {
-  const apiKey = req.headers.get('x-api-key') || req.cookies.get('api_key')?.value;
-  if (!apiKey) {
+    if (!apiKey) {
+      return null;
+    }
+
+    // Query the database for the API key
+    const { data, error } = await supabase
+      .from('api_keys')
+      .select('*')
+      .eq('key', apiKey)
+      .single();
+
+    if (error) {
+      console.error('Error fetching API key:', error);
+      return null;
+    }
+
+    return data;
+  } catch (error) {
+    console.error('Error in getApiKeyFromRequest:', error);
     return null;
   }
+}
 
-  const apiKeyRecord = await prisma.apiKey.findFirst({
-    where: {
-      key: apiKey,
-      is_active: true,
-      OR: [
-        { expires_at: null },
-        { expires_at: { gt: new Date() } },
-      ],
-    },
-  });
+export async function getApiKeyFromCookie() {
+  try {
+    const cookieStore = await cookies();
+    const apiKey = cookieStore.get('apiKey')?.value;
 
-  if (!apiKeyRecord) {
+    if (!apiKey) {
+      return null;
+    }
+
+    // Query the database for the API key
+    const { data, error } = await supabase
+      .from('api_keys')
+      .select('*')
+      .eq('key', apiKey)
+      .single();
+
+    if (error) {
+      console.error('Error fetching API key:', error);
+      return null;
+    }
+
+    return data;
+  } catch (error) {
+    console.error('Error in getApiKeyFromCookie:', error);
     return null;
   }
-
-  return {
-    id: apiKeyRecord.id,
-    user_id: apiKeyRecord.user_id,
-    rate_limit_per_minute: apiKeyRecord.rate_limit_per_minute,
-    burst_limit: apiKeyRecord.burst_limit,
-    window_seconds: apiKeyRecord.window_seconds,
-  };
 } 

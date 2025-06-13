@@ -1,54 +1,59 @@
 import { initTRPC, TRPCError } from '@trpc/server';
-import { type CreateNextContextOptions } from '@trpc/server/adapters/next';
-import { PrismaClient } from '../generated/prisma';
-import { getApiKeyFromRequest } from '../utils/auth';
+import { getSupabaseAdmin } from '../utils/supabase';
+import type { NextRequest } from 'next/server';
 
-const prisma = new PrismaClient();
-
-// Context type definition
+// Create a context type
 export type Context = {
-  prisma: PrismaClient;
-  req: CreateNextContextOptions['req'];
-  apiKey?: {
-    id: string;
-    user_id: string;
-    rate_limit_per_minute: number;
-    burst_limit: number;
-    window_seconds: number;
-  };
+  supabase: ReturnType<typeof getSupabaseAdmin>;
+  req?: NextRequest;
 };
 
-// Create context for each request
-export const createContext = async (opts: { req: CreateNextContextOptions['req'] }): Promise<Context> => {
-  return {
-    prisma,
-    req: opts.req,
-  };
-};
-
-// Initialize tRPC
+// Create the tRPC instance
 const t = initTRPC.context<Context>().create();
 
 // Export reusable router and procedure helpers
 export const router = t.router;
 export const publicProcedure = t.procedure;
-export const middleware = t.middleware;
 
-// API Key middleware
-const apiKeyMiddleware = middleware(async ({ ctx, next }) => {
-  const apiKey = await getApiKeyFromRequest(ctx.req);
-  if (!apiKey) {
+// Create a middleware that adds the Supabase client to the context
+const supabaseMiddleware = t.middleware(async ({ next, ctx }) => {
+  try {
+    const supabase = getSupabaseAdmin(); // This will throw if not configured
+    return await next({
+      ctx: {
+        ...ctx,
+        supabase,
+      },
+    });
+  } catch (error) {
+    console.error('Supabase middleware error:', error);
     throw new TRPCError({
-      code: 'UNAUTHORIZED',
-      message: 'API key is required',
+      code: 'INTERNAL_SERVER_ERROR',
+      message: error instanceof Error ? error.message : 'Database not configured',
+      cause: error,
     });
   }
-  return next({
-    ctx: {
-      ...ctx,
-      apiKey,
-    },
-  });
 });
 
-export const apiKeyProcedure = t.procedure.use(apiKeyMiddleware); 
+// Create a procedure that uses the Supabase middleware
+export const supabaseProcedure = t.procedure.use(supabaseMiddleware);
+
+// Create and export a context function for tRPC handlers
+export function createContext({ req }: { req: NextRequest }) {
+  console.log('Creating TRPC context...');
+  
+  try {
+    const supabase = getSupabaseAdmin();
+    return {
+      supabase,
+      req,
+    };
+  } catch (error) {
+    console.error('Error creating TRPC context:', error);
+    throw new TRPCError({
+      code: 'INTERNAL_SERVER_ERROR',
+      message: 'Database not configured properly',
+      cause: error,
+    });
+  }
+} 

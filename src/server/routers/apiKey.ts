@@ -1,84 +1,143 @@
 import { z } from 'zod';
-import { router, apiKeyProcedure } from '../trpc';
-import { PrismaClient } from '../../generated/prisma';
-
-const prisma = new PrismaClient();
+import { router, supabaseProcedure } from '../trpc';
+import { handleSupabaseError } from '../../utils/supabase';
+import { generateApiKey } from '../../utils/api-key';
 
 export const apiKeyRouter = router({
-  list: apiKeyProcedure.query(async ({ ctx }) => {
-    const apiKeys = await prisma.apiKey.findMany({
-      where: {
-        user_id: ctx.apiKey.user_id,
-      },
-      select: {
-        id: true,
-        key: true,
-        created_at: true,
-        expires_at: true,
-        is_active: true,
-        rate_limit_per_minute: true,
-        last_request_at: true,
-        burst_limit: true,
-        window_seconds: true,
-      },
-    });
-    return apiKeys;
-  }),
-
-  create: apiKeyProcedure
+  list: supabaseProcedure
     .input(
       z.object({
-        rate_limit_per_minute: z.number().min(1).max(1000).optional(),
-        expires_at: z.date().optional(),
+        userId: z.string(),
       })
     )
-    .mutation(async ({ ctx, input }) => {
-      const apiKey = await prisma.apiKey.create({
-        data: {
-          user_id: ctx.apiKey.user_id,
-          key: crypto.randomUUID(),
-          rate_limit_per_minute: input.rate_limit_per_minute ?? 100,
-          expires_at: input.expires_at,
-          burst_limit: 10,
-          window_seconds: 60,
-        },
-      });
-      return apiKey;
+    .query(async ({ input, ctx }) => {
+      try {
+        const { data, error } = await ctx.supabase
+          .from('api_keys')
+          .select('*')
+          .eq('user_id', input.userId);
+
+        if (error) {
+          return handleSupabaseError(error);
+        }
+
+        return data;
+      } catch (error) {
+        console.error('Error listing API keys:', error);
+        return {
+          error: {
+            message: 'An error occurred while listing API keys',
+            code: 'INTERNAL_ERROR',
+          },
+        };
+      }
     }),
 
-  toggle: apiKeyProcedure
+  create: supabaseProcedure
+    .input(
+      z.object({
+        userId: z.string(),
+        name: z.string(),
+      })
+    )
+    .mutation(async ({ input, ctx }) => {
+      try {
+        const apiKey = generateApiKey();
+        const { data, error } = await ctx.supabase
+          .from('api_keys')
+          .insert({
+            user_id: input.userId,
+            name: input.name,
+            key: apiKey,
+            rate_limit_per_minute: 100,
+            burst_limit: 10,
+            window_seconds: 60,
+          })
+          .select()
+          .single();
+
+        if (error) {
+          return handleSupabaseError(error);
+        }
+
+        return data;
+      } catch (error) {
+        console.error('Error creating API key:', error);
+        return {
+          error: {
+            message: 'An error occurred while creating API key',
+            code: 'INTERNAL_ERROR',
+          },
+        };
+      }
+    }),
+
+  update: supabaseProcedure
     .input(
       z.object({
         id: z.string(),
-        is_active: z.boolean(),
+        name: z.string().optional(),
+        rateLimitPerMinute: z.number().optional(),
+        burstLimit: z.number().optional(),
+        windowSeconds: z.number().optional(),
       })
     )
-    .mutation(async ({ ctx, input }) => {
-      const apiKey = await prisma.apiKey.update({
-        where: {
-          id: input.id,
-          user_id: ctx.apiKey.user_id,
-        },
-        data: {
-          is_active: input.is_active,
-        },
-      });
-      return apiKey;
+    .mutation(async ({ input, ctx }) => {
+      try {
+        const { data, error } = await ctx.supabase
+          .from('api_keys')
+          .update({
+            name: input.name,
+            rate_limit_per_minute: input.rateLimitPerMinute,
+            burst_limit: input.burstLimit,
+            window_seconds: input.windowSeconds,
+          })
+          .eq('id', input.id)
+          .select()
+          .single();
+
+        if (error) {
+          return handleSupabaseError(error);
+        }
+
+        return data;
+      } catch (error) {
+        console.error('Error updating API key:', error);
+        return {
+          error: {
+            message: 'An error occurred while updating API key',
+            code: 'INTERNAL_ERROR',
+          },
+        };
+      }
     }),
 
-  delete: apiKeyProcedure
+  delete: supabaseProcedure
     .input(
       z.object({
         id: z.string(),
       })
     )
-    .mutation(async ({ ctx, input }) => {
-      await prisma.apiKey.delete({
-        where: {
-          id: input.id,
-          user_id: ctx.apiKey.user_id,
-        },
-      });
-      return { success: true };
+    .mutation(async ({ input, ctx }) => {
+      try {
+        const { error } = await ctx.supabase
+          .from('api_keys')
+          .delete()
+          .eq('id', input.id);
+
+        if (error) {
+          return handleSupabaseError(error);
+        }
+
+        return { success: true };
+      } catch (error) {
+        console.error('Error deleting API key:', error);
+        return {
+          error: {
+            message: 'An error occurred while deleting API key',
+            code: 'INTERNAL_ERROR',
+          },
+        };
+      }
     }),
 }); 
